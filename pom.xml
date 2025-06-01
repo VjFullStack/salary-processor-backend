@@ -15,11 +15,11 @@
     <description>Spring Boot backend for Salary Processing System</description>
     
     <properties>
-        <java.version>20</java.version>
-        <contentful.version>10.5.8</contentful.version>
+        <java.version>11</java.version>
         <poi.version>5.2.3</poi.version>
         <itext.version>7.2.5</itext.version>
         <jjwt.version>0.11.5</jjwt.version>
+        <jackson.version>2.15.2</jackson.version>
     </properties>
     
     <!-- Using Maven Central for all dependencies -->
@@ -82,11 +82,11 @@
             <scope>runtime</scope>
         </dependency>
         
-        <!-- Contentful CMS for employee data -->
+        <!-- JSON Processing -->
         <dependency>
-            <groupId>com.contentful.java</groupId>
-            <artifactId>java-sdk</artifactId>
-            <version>${contentful.version}</version>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>${jackson.version}</version>
         </dependency>
         
         <!-- Lombok for boilerplate reduction -->
