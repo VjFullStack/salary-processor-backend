@@ -16,18 +16,13 @@
     
     <properties>
         <java.version>20</java.version>
-        <contentful.version>12.4.0</contentful.version>
+        <contentful.version>10.5.8</contentful.version>
         <poi.version>5.2.3</poi.version>
         <itext.version>7.2.5</itext.version>
         <jjwt.version>0.11.5</jjwt.version>
     </properties>
     
-    <repositories>
-        <repository>
-            <id>contentful-repo</id>
-            <url>https://maven.contentful.com</url>
-        </repository>
-    </repositories>
+    <!-- Using Maven Central for all dependencies -->
     
     <dependencies>
         <!-- Spring Boot Starters -->
