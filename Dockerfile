@@ -4,7 +4,8 @@ WORKDIR /app
 
 # Copy pom.xml first for better caching
 COPY pom.xml .
-RUN mvn dependency:go-offline
+# Skip the dependency:go-offline step which is causing issues
+# RUN mvn dependency:go-offline
 
 # Copy source code
 COPY src ./src
