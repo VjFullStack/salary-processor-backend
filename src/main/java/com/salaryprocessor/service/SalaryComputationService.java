@@ -79,59 +79,30 @@ public class SalaryComputationService {
         log.info("Found {} matching employee IDs between attendance records and Contentful: {}", 
             matchingEmployeeIds.size(), matchingEmployeeIds);
         
-        // Extract employee names from attendance records
-        Map<String, String> extractedNames = new HashMap<>();
-        for (Map.Entry<String, List<AttendanceRecord>> entry : attendanceRecords.entrySet()) {
-            String empId = entry.getKey();
-            List<AttendanceRecord> records = entry.getValue();
+        // If no matching employee IDs, return empty result
+        if (matchingEmployeeIds.isEmpty()) {
+            log.warn("No matching employees found in Contentful for the provided attendance records");
+            return results;
+        }
+        
+        // Process each employee's attendance records, but only for employees that exist in Contentful
+        for (String employeeId : matchingEmployeeIds) {
+            List<AttendanceRecord> records = attendanceRecords.get(employeeId);
+            if (records == null || records.isEmpty()) {
+                log.warn("No attendance records found for employee ID: {}", employeeId);
+                continue;
+            }
             
-            // If we have records with employee names, use the first one
-            if (!records.isEmpty() && records.get(0).getEmployeeName() != null && !records.get(0).getEmployeeName().isEmpty()) {
-                extractedNames.put(empId, records.get(0).getEmployeeName());
-                log.info("Extracted name for employee ID {}: {}", empId, records.get(0).getEmployeeName());
-            }
-        }
-        
-        // Create default employee map to ensure all employees in attendance records have a name
-        Map<String, Employee> defaultEmployeeMap = new HashMap<>();
-        for (String empId : attendanceRecords.keySet()) {
-            if (!employeeMap.containsKey(empId)) {
-                Employee defaultEmployee = new Employee();
-                defaultEmployee.setEmployeeId(empId);
-                // Use extracted name if available, otherwise use default
-                if (extractedNames.containsKey(empId)) {
-                    defaultEmployee.setName(extractedNames.get(empId));
-                    log.info("Using extracted name for employee ID {}: {}", empId, extractedNames.get(empId));
-                } else {
-                    defaultEmployee.setName("Employee " + empId);
-                    log.info("No extracted name available, using default for ID: {}", empId);
-                }
-                defaultEmployee.setMonthlySalary(50000.0); // Default salary
-                defaultEmployeeMap.put(empId, defaultEmployee);
-                log.info("Created default employee for ID: {}", empId);
-            }
-        }
-        
-        // Combine the real employee map with default employee map
-        for (Map.Entry<String, Employee> entry : defaultEmployeeMap.entrySet()) {
-            employeeMap.put(entry.getKey(), entry.getValue());
-        }
-        
-        // Process each employee's attendance records
-        attendanceRecords.forEach((employeeId, records) -> {
             log.info("Processing employee ID: {} with {} attendance records", employeeId, records.size());
             Employee employee = employeeMap.get(employeeId);
             
             if (employee == null) {
-                log.warn("Employee with ID {} not found in Contentful. Using placeholder employee.", employeeId);
-                // This shouldn't happen with our default employee map, but just in case
-                employee = new Employee();
-                employee.setEmployeeId(employeeId);
-                employee.setName("Unknown Employee " + employeeId);
-                employee.setMonthlySalary(50000.0); // Default salary
-            } else {
-                log.info("Found employee in Contentful: ID={}, Name={}", employee.getEmployeeId(), employee.getName());
+                // This shouldn't happen because we filtered for matching IDs, but just in case
+                log.warn("Employee with ID {} not found in Contentful. Skipping salary computation.", employeeId);
+                continue;
             }
+            
+            log.info("Found employee in Contentful: ID={}, Name={}", employee.getEmployeeId(), employee.getName());
             
             // Count different attendance statuses
             long presentCount = records.stream()
@@ -255,7 +226,7 @@ public class SalaryComputationService {
             
             log.info("Calculated salary for employee {}: monthly={}, final={}, work ratio={}%", 
                     employeeId, employee.getMonthlySalary(), finalSalary, workPercentage);
-        });
+        }
         
         return results;
     }
