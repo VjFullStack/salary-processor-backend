@@ -78,7 +78,9 @@ public class WebSecurityConfig extends WebSecurityConfigurerAdapter {
         configuration.setAllowedOrigins(Arrays.asList(
             "http://localhost:3000", 
             "http://localhost:3001", 
-            "http://localhost:3002"
+            "http://localhost:3002",
+            "https://salary-processor-frontend.vercel.app",
+            "https://salary-processor-frontend-vjfullstack.vercel.app"
         ));
         configuration.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
         configuration.setAllowedHeaders(Arrays.asList(
