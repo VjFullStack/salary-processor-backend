@@ -16,7 +16,7 @@
     
     <properties>
         <java.version>20</java.version>
-        <!-- <contentful.version>12.4.0</contentful.version> Disabled Contentful and using hardcoded 50,000 INR salaries -->
+        <contentful.version>12.4.0</contentful.version>
         <poi.version>5.2.3</poi.version>
         <itext.version>7.2.5</itext.version>
         <jjwt.version>0.11.5</jjwt.version>
@@ -87,13 +87,12 @@
             <scope>runtime</scope>
         </dependency>
         
-        <!-- Contentful CMS - Disabled and using hardcoded 50,000 INR salaries
+        <!-- Contentful CMS for employee data -->
         <dependency>
             <groupId>com.contentful.java</groupId>
             <artifactId>java-sdk</artifactId>
             <version>${contentful.version}</version>
         </dependency>
-        -->
         
         <!-- Lombok for boilerplate reduction -->
         <dependency>

@@ -1,7 +1,9 @@
 package com.salaryprocessor.controller;
 
 import com.salaryprocessor.model.AttendanceRecord;
+import com.salaryprocessor.model.Employee;
 import com.salaryprocessor.model.SalaryResult;
+import com.salaryprocessor.service.ContentfulService;
 import com.salaryprocessor.service.ExcelParserService;
 import com.salaryprocessor.service.PDFGenerationService;
 import com.salaryprocessor.service.SalaryComputationService;
@@ -52,6 +54,9 @@ public class SalaryProcessorController {
     @Autowired
     private SalaryComputationService salaryComputationService;
     
+    @Autowired
+    private ContentfulService contentfulService;
+    
     /**
      * Set the total working days for salary calculation
      * @param days The total working days to set
@@ -81,6 +86,46 @@ public class SalaryProcessorController {
         
         Map<String, Object> response = new HashMap<>();
         response.put("totalWorkingDays", days);
+        
+        return ResponseEntity.ok(response);
+    }
+    
+    /**
+     * Get all employees from Contentful
+     * @return List of all employees
+     */
+    @GetMapping("/employees")
+    public ResponseEntity<List<Employee>> getAllEmployees() {
+        log.info("Fetching all employees from Contentful");
+        List<Employee> employees = contentfulService.getAllEmployees();
+        return ResponseEntity.ok(employees);
+    }
+    
+    /**
+     * Get an employee by ID from Contentful
+     * @param employeeId The ID of the employee to fetch
+     * @return The employee with the given ID
+     */
+    @GetMapping("/employees/{employeeId}")
+    public ResponseEntity<Employee> getEmployeeById(@PathVariable String employeeId) {
+        log.info("Fetching employee with ID: {} from Contentful", employeeId);
+        Employee employee = contentfulService.getEmployeeById(employeeId);
+        return ResponseEntity.ok(employee);
+    }
+    
+    /**
+     * Refresh employee data from Contentful
+     * @return Success message
+     */
+    @PostMapping("/employees/refresh")
+    public ResponseEntity<Map<String, Object>> refreshEmployeeData() {
+        log.info("Refreshing employee data from Contentful");
+        contentfulService.refreshEmployeeData();
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("status", "success");
+        response.put("message", "Employee data refreshed from Contentful");
+        response.put("employeeCount", contentfulService.getAllEmployees().size());
         
         return ResponseEntity.ok(response);
     }
