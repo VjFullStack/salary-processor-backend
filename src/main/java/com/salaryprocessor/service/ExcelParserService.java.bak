@@ -1,0 +1,777 @@
+package com.salaryprocessor.service;
+
+import com.salaryprocessor.model.AttendanceRecord;
+import lombok.RequiredArgsConstructor;
+import org.apache.poi.ss.usermodel.Cell;
+import org.apache.poi.ss.usermodel.CellType;
+import org.apache.poi.ss.usermodel.DateUtil;
+import org.apache.poi.ss.usermodel.Row;
+import org.apache.poi.ss.usermodel.Sheet;
+import org.apache.poi.ss.usermodel.Workbook;
+import org.apache.poi.ss.usermodel.WorkbookFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Service;
+import org.springframework.web.multipart.MultipartFile;
+
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+
+@Service
+@RequiredArgsConstructor
+public class ExcelParserService {
+    
+    private static final Logger log = LoggerFactory.getLogger(ExcelParserService.class);
+
+    private static final LocalTime LATE_THRESHOLD = LocalTime.of(10, 0); // 10:00 AM
+    private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ofPattern("HH:mm");
+    
+    // Regular expressions for employee ID pattern detection
+    private static final Pattern NUMERIC_ID_PATTERN = Pattern.compile("^\\d+$");
+    private static final Pattern TEST_EMPLOYEE_PATTERN = Pattern.compile("(?i).*test.*");
+
+    /**
+     * Parse Excel file to extract attendance data
+     * @param file the uploaded Excel file
+     * @return A map of employee IDs to their attendance records
+     */
+    public Map<String, List<AttendanceRecord>> parseExcel(MultipartFile file) {
+        try {
+            log.info("Starting to parse Excel file: {}, size: {}, content type: {}", 
+                file.getOriginalFilename(), file.getSize(), file.getContentType());
+            
+            // Check if file is empty
+            if (file.isEmpty()) {
+                log.error("Uploaded file is empty");
+                return new HashMap<>();
+            }
+            
+            // Debug file signature
+            log.info("Excel file detection - first few bytes:");
+            try {
+                byte[] bytes = new byte[Math.min(16, (int)file.getSize())];
+                file.getInputStream().read(bytes);
+                StringBuilder hexDump = new StringBuilder();
+                for (int i = 0; i < bytes.length; i++) {
+                    hexDump.append(String.format("%02X ", bytes[i]));
+                }
+                log.info("File signature bytes: {}", hexDump.toString());
+                
+                // Check for Excel signatures
+                // D0 CF 11 E0 = OLE2 (xls)
+                // 50 4B 03 04 = ZIP (xlsx)
+                if (bytes.length >= 4 && bytes[0] == (byte)0xD0 && bytes[1] == (byte)0xCF) {
+                    log.info("Detected old Excel format (.xls/OLE2)");
+                } else if (bytes.length >= 4 && bytes[0] == (byte)0x50 && bytes[1] == (byte)0x4B) {
+                    log.info("Detected new Excel format (.xlsx/ZIP)");
+                }
+            } catch (Exception e) {
+                log.warn("Could not read file signature: {}", e.getMessage());
+            }
+            
+            // Create workbook with detailed error handling
+            Workbook workbook;
+            try {
+                workbook = WorkbookFactory.create(file.getInputStream());
+                log.info("Successfully created workbook");
+            } catch (Exception e) {
+                log.error("Failed to create workbook: {}", e.getMessage(), e);
+                log.error("This could indicate a corrupted file or unsupported format");
+                return new HashMap<>();
+            }
+            
+            // Check if workbook has sheets
+            if (workbook.getNumberOfSheets() == 0) {
+                log.error("Excel file has no sheets");
+                workbook.close();
+                return new HashMap<>();
+            }
+            
+            log.info("Excel file has {} sheets", workbook.getNumberOfSheets());
+            
+            // List all available sheets
+            for (int i = 0; i < workbook.getNumberOfSheets(); i++) {
+                log.info("Sheet {}: '{}' with {} rows", 
+                    i, workbook.getSheetName(i), workbook.getSheetAt(i).getPhysicalNumberOfRows());
+            }
+            
+            // Use first sheet by default
+            Sheet sheet = workbook.getSheetAt(0);
+            log.info("Using sheet: {} with {} rows", sheet.getSheetName(), sheet.getPhysicalNumberOfRows());
+            
+            // Dump Excel structure for debugging
+            dumpExcelStructure(sheet);
+            
+            // Check if sheet has rows
+            if (sheet.getPhysicalNumberOfRows() == 0) {
+                log.error("Selected sheet has no rows");
+                workbook.close();
+                return new HashMap<>();
+            }
+            
+            // Check the first few rows for headers
+            Row headerRow = null;
+            int headerRowIndex = -1;
+            
+            // Try first 5 rows to find a suitable header row
+            for (int i = 0; i < Math.min(5, sheet.getPhysicalNumberOfRows()); i++) {
+                Row row = sheet.getRow(i);
+                if (row != null && row.getPhysicalNumberOfCells() > 3) {
+                    // Look for common header patterns in this row
+                    boolean potentialHeaderRow = false;
+                    StringBuilder rowContent = new StringBuilder("Row " + i + " content: ");
+                    
+                    for (int j = 0; j < row.getLastCellNum(); j++) {
+                        Cell cell = row.getCell(j);
+                        if (cell != null) {
+                            String cellValue = getStringValue(cell).toLowerCase();
+                            rowContent.append("'" + cellValue + "', ");
+                            
+                            // Check if this cell contains any common header terms
+                            if (cellValue.contains("id") || cellValue.contains("name") || 
+                                cellValue.contains("date") || cellValue.contains("time") || 
+                                cellValue.contains("code") || cellValue.contains("employee") || 
+                                cellValue.contains("status") || cellValue.contains("hour")) {
+                                potentialHeaderRow = true;
+                            }
+                        }
+                    }
+                    
+                    log.info(rowContent.toString());
+                    
+                    if (potentialHeaderRow) {
+                        headerRow = row;
+                        headerRowIndex = i;
+                        log.info("Found potential header row at index {}", i);
+                        break;
+                    }
+                }
+            }
+            
+            if (headerRow == null) {
+                log.error("Could not find a suitable header row in the first 5 rows");
+                log.info("Falling back to first row as header");
+                headerRow = sheet.getRow(0);
+                headerRowIndex = 0;
+                
+                if (headerRow == null) {
+                    log.error("Header row is null");
+                    workbook.close();
+                    return new HashMap<>();
+                }
+            }
+            
+            log.info("Header row has {} cells", headerRow.getPhysicalNumberOfCells());
+            
+            // Debug: Print header row contents
+            StringBuilder headerContents = new StringBuilder("Header contents: ");
+            for (int i = 0; i < headerRow.getLastCellNum(); i++) {
+                Cell cell = headerRow.getCell(i);
+                String value = (cell != null) ? getStringValue(cell) : "NULL";
+                headerContents.append("'" + value + "'").append(", ");
+            }
+            log.info(headerContents.toString());
+            
+            // Check ALL column headers to understand the file format
+            Map<Integer, String> headerMap = new HashMap<>();
+            Map<String, Integer> columnIndexMap = new HashMap<>();
+            
+            for (int i = 0; i < headerRow.getLastCellNum(); i++) {
+                Cell cell = headerRow.getCell(i);
+                if (cell != null) {
+                    String headerValue = getStringValue(cell);
+                    headerMap.put(i, headerValue);
+                    columnIndexMap.put(headerValue.toLowerCase().replace(" ", ""), i);
+                    log.info("Found header at column {}: '{}'", i, headerValue);
+                }
+            }
+            
+            // Define possible header names for each required field
+            Map<String, List<String>> expectedHeaderVariations = new HashMap<>();
+            // Expand employee ID variations to handle more formats
+            expectedHeaderVariations.put("employeeId", Arrays.asList(
+                "employee id", "employeeid", "emp id", "empid", "id", "employee", "name", 
+                "employee code", "employee no", "employee number", "emp code", "emp no", "empcode", 
+                "code", "staff id", "staffid", "staff no", "user id", "sr no", "no", "sr"
+            ));
+            
+            // Expand date variations to catch more formats
+            expectedHeaderVariations.put("date", Arrays.asList(
+                "date", "work date", "workdate", "attendance date", "attendance", "day", 
+                "punch date", "punchdate", "date of attendance", "report date", "shift date"
+            ));
+            
+            // Expand time variations
+            expectedHeaderVariations.put("inTime", Arrays.asList(
+                "in time", "intime", "time in", "clock in", "checkin", "in", "arrival", 
+                "arrival time", "start time", "punch in", "first punch", "entry time"
+            ));
+            
+            expectedHeaderVariations.put("outTime", Arrays.asList(
+                "out time", "outtime", "time out", "clock out", "checkout", "out", "departure", 
+                "departure time", "end time", "punch out", "last punch", "exit time"
+            ));
+            
+            expectedHeaderVariations.put("status", Arrays.asList(
+                "status", "attendance", "attendance status", "present", "absent", "state", 
+                "mark", "attendance mark", "p/a", "p/a status"
+            ));
+            
+            expectedHeaderVariations.put("hoursWorked", Arrays.asList(
+                "hours worked", "hoursworked", "duration", "work hours", "workhours", "total hours", 
+                "hrs", "hours", "time", "work time", "working hours", "total", "total duration"
+            ));
+            
+            // Find the best match for each required field
+            Map<String, Integer> fieldColumnMap = new HashMap<>();
+            
+            for (Map.Entry<String, List<String>> entry : expectedHeaderVariations.entrySet()) {
+                String fieldName = entry.getKey();
+                List<String> variations = entry.getValue();
+                
+                // First try exact matches
+                for (String variation : variations) {
+                    if (columnIndexMap.containsKey(variation.toLowerCase().replace(" ", ""))) {
+                        fieldColumnMap.put(fieldName, columnIndexMap.get(variation.toLowerCase().replace(" ", "")));
+                        log.info("Mapped '{}' to column {}: '{}'", fieldName, 
+                            columnIndexMap.get(variation.toLowerCase().replace(" ", "")),
+                            headerMap.get(columnIndexMap.get(variation.toLowerCase().replace(" ", ""))));
+                        break;
+                    }
+                }
+                
+                // If no exact match, try partial matches
+                if (!fieldColumnMap.containsKey(fieldName)) {
+                    for (Map.Entry<String, Integer> headerEntry : columnIndexMap.entrySet()) {
+                        for (String variation : variations) {
+                            if (headerEntry.getKey().contains(variation.toLowerCase().replace(" ", ""))) {
+                                fieldColumnMap.put(fieldName, headerEntry.getValue());
+                                log.info("Mapped '{}' to column {} (partial match): '{}'", fieldName, 
+                                    headerEntry.getValue(), headerMap.get(headerEntry.getValue()));
+                                break;
+                            }
+                        }
+                        if (fieldColumnMap.containsKey(fieldName)) {
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            // Check if we have mapped all required fields
+            List<String> requiredFields = Arrays.asList("employeeId", "date");
+            boolean missingRequiredFields = false;
+            StringBuilder missingFields = new StringBuilder();
+            
+            for (String field : requiredFields) {
+                if (!fieldColumnMap.containsKey(field)) {
+                    missingRequiredFields = true;
+                    missingFields.append(field).append(", ");
+                }
+            }
+            
+            if (missingRequiredFields) {
+                log.warn("Excel file is missing standard required fields: {} ", missingFields);
+                log.info("Attempting to detect employee data patterns directly from rows...");
+                
+                // Special fallback for files without clear headers - try to detect employee data in rows
+                Map<String, List<AttendanceRecord>> specialParseResult = attemptSpecialParsing(sheet, headerRowIndex);
+                if (!specialParseResult.isEmpty()) {
+                    log.info("Successfully parsed {} employees using special pattern detection", specialParseResult.size());
+                    workbook.close();
+                    return specialParseResult;
+                }
+                
+                log.error("Could not detect employee data even with special parsing");
+                log.error("Cannot parse Excel file without employee ID and date fields");
+                workbook.close();
+                return new HashMap<>();
+            }
+            
+            log.info("Field mapping complete. Proceeding with parsing using the mapped columns.");
+            
+            List<AttendanceRecord> records = new ArrayList<>();
+
+            // Skip the header row (index 0) and process from row 1 onwards
+            for (int i = 1; i <= sheet.getLastRowNum(); i++) {
+                Row row = sheet.getRow(i);
+                if (row == null) {
+                    log.info("Skipping null row at index {}", i);
+                    continue;
+                }
+                
+                // Check if row appears to be empty
+                boolean rowEmpty = true;
+                for (int j = 0; j < Math.min(6, row.getLastCellNum()); j++) {
+                    Cell cell = row.getCell(j);
+                    if (cell != null && cell.getCellType() != CellType.BLANK) {
+                        rowEmpty = false;
+                        break;
+                    }
+                }
+                
+                if (rowEmpty) {
+                    log.info("Skipping empty row at index {}", i);
+                    continue;
+                }
+                
+                // Try to extract employee ID for logging
+                String employeeId = "unknown";
+                if (row.getCell(0) != null) {
+                    employeeId = getStringValue(row.getCell(0));
+                }
+                
+                log.info("Processing row {}: Employee ID {}", i, employeeId);
+                
+                // Debug: Print row contents
+                StringBuilder rowContents = new StringBuilder("Row contents: ");
+                for (int j = 0; j < Math.min(6, row.getLastCellNum()); j++) {
+                    Cell cell = row.getCell(j);
+                    String value = (cell != null) ? getStringValue(cell) : "NULL";
+                    rowContents.append("'" + value + "'").append(", ");
+                }
+                log.info(rowContents.toString());
+                
+                AttendanceRecord record = parseRow(row, fieldColumnMap);
+                if (record != null) {
+                    records.add(record);
+                    log.info("Added record for employee {} on date {}", record.getEmployeeId(), record.getDate());
+                } else {
+                    log.info("Skipped row {} (employee ID {}): invalid or no data", i, employeeId);
+                }
+            }
+            
+            log.info("Parsed a total of {} attendance records", records.size());
+            
+            // Group records by employee ID
+            Map<String, List<AttendanceRecord>> recordsByEmployee = records.stream()
+                    .collect(Collectors.groupingBy(AttendanceRecord::getEmployeeId));
+            
+            // Log the grouping results
+            log.info("Grouped attendance records by employee ID: {} employees found", recordsByEmployee.size());
+            recordsByEmployee.forEach((empId, empRecords) -> {
+                log.info("Employee {}: {} attendance records", empId, empRecords.size());
+            });
+            
+            workbook.close();
+            return recordsByEmployee;
+            
+        } catch (Exception e) {
+            log.error("Error parsing Excel file: {}", e.getMessage(), e);
+            return new HashMap<>(); // Return empty map on error
+        }
+    }
+    
+    /**
+     * Parse a row from the Excel file to create an attendance record
+     * @param row The row to parse
+     * @param fieldColumnMap Map of field names to column indices
+     * @return An AttendanceRecord or null if the row cannot be parsed
+     */
+    private AttendanceRecord parseRow(Row row, Map<String, Integer> fieldColumnMap) {
+        try {
+            // Get employee ID and name from the cell (various formats supported)
+            String employeeId = null;
+            String employeeName = null;
+            
+            if (fieldColumnMap.containsKey("employeeId")) {
+                Cell employeeCell = row.getCell(fieldColumnMap.get("employeeId"));
+                if (employeeCell != null) {
+                    String rawEmployeeValue = getStringValue(employeeCell);
+                    log.info("Raw employee value: '{}'", rawEmployeeValue);
+                    
+                    // Check if the value is empty
+                    if (rawEmployeeValue == null || rawEmployeeValue.trim().isEmpty()) {
+                        log.info("Empty employee value, skipping row");
+                        return null;
+                    }
+                    
+                    // Attempt to extract employee ID and name from the raw value
+                    // Format possibilities:
+                    // 1. "37 : Shravani Shinde"
+                    // 2. "37 - Shravani Shinde"
+                    // 3. "Shravani Shinde (37)"
+                    // 4. "37 Shravani Shinde"
+                    
+                    // Check for format with colon separator: "37 : Shravani Shinde"
+                    if (rawEmployeeValue.contains(":")) {
+                        String[] parts = rawEmployeeValue.split(":", 2);
+                        employeeId = parts[0].trim();
+                        if (parts.length > 1) {
+                            employeeName = parts[1].trim();
+                        }
+                        log.info("Colon format detected: ID='{}', Name='{}'", employeeId, employeeName);
+                    }
+                    // Check for format with dash separator: "37 - Shravani Shinde"
+                    else if (rawEmployeeValue.contains(" - ")) {
+                        String[] parts = rawEmployeeValue.split(" - ", 2);
+                        employeeId = parts[0].trim();
+                        if (parts.length > 1) {
+                            employeeName = parts[1].trim();
+                        }
+                        log.info("Dash format detected: ID='{}', Name='{}'", employeeId, employeeName);
+                    }
+                    // Check for format with parentheses: "Shravani Shinde (37)"
+                    else if (rawEmployeeValue.contains("(") && rawEmployeeValue.contains(")")) {
+                        int openParen = rawEmployeeValue.lastIndexOf("(");
+                        int closeParen = rawEmployeeValue.lastIndexOf(")");
+                        if (openParen >= 0 && closeParen > openParen) {
+                            employeeId = rawEmployeeValue.substring(openParen + 1, closeParen).trim();
+                            employeeName = rawEmployeeValue.substring(0, openParen).trim();
+                            log.info("Parentheses format detected: ID='{}', Name='{}'", employeeId, employeeName);
+                        }
+                    }
+                    // Check if it's just a number (employee ID only)
+                    else if (NUMERIC_ID_PATTERN.matcher(rawEmployeeValue.trim()).matches()) {
+                        employeeId = rawEmployeeValue.trim();
+                        log.info("Numeric ID only format detected: ID='{}'", employeeId);
+                    }
+                    // Default case: assume first word is ID and rest is name
+                    else {
+                        String[] parts = rawEmployeeValue.trim().split("\\s+", 2);
+                        if (parts.length > 0 && NUMERIC_ID_PATTERN.matcher(parts[0]).matches()) {
+                            employeeId = parts[0];
+                            if (parts.length > 1) {
+                                employeeName = parts[1];
+                            }
+                            log.info("Space separator format detected: ID='{}', Name='{}'", employeeId, employeeName);
+                        } else {
+                            // Just use the whole string as employee ID if we can't parse it
+                            employeeId = rawEmployeeValue.trim();
+                            log.info("Using raw value as ID: '{}'", employeeId);
+                        }
+                    }
+                    
+                    // Skip test employees (IDs starting with 'T' or names containing 'test')
+                    if (employeeId != null && employeeId.startsWith("T")) {
+                        log.info("Skipping test employee with ID starting with 'T': {}", employeeId);
+                        return null;
+                    }
+                    
+                    if (employeeName != null && TEST_EMPLOYEE_PATTERN.matcher(employeeName).matches()) {
+                        log.info("Skipping test employee with 'test' in name: {}", employeeName);
+                        return null;
+                    }
+                }
+            }
+            
+            if (employeeId == null || employeeId.trim().isEmpty()) {
+                log.info("No valid employee ID found, skipping row");
+                return null;
+            }
+            
+            // Get date
+            LocalDate date = null;
+            if (fieldColumnMap.containsKey("date")) {
+                Cell dateCell = row.getCell(fieldColumnMap.get("date"));
+                if (dateCell != null) {
+                    try {
+                        if (dateCell.getCellType() == CellType.NUMERIC && DateUtil.isCellDateFormatted(dateCell)) {
+                            // Date is stored as a numeric value
+                            date = dateCell.getLocalDateTimeCellValue().toLocalDate();
+                            log.info("Parsed date from numeric cell: {}", date);
+                        } else {
+                            // Date is stored as a string, try to parse it
+                            String dateStr = getStringValue(dateCell);
+                            log.info("Raw date string: {}", dateStr);
+                            
+                            // Try different date formats
+                            try {
+                                // Try standard ISO format (yyyy-MM-dd)
+                                date = LocalDate.parse(dateStr);
+                            } catch (DateTimeParseException e1) {
+                                try {
+                                    // Try MM/dd/yyyy format
+                                    DateTimeFormatter formatter = DateTimeFormatter.ofPattern("MM/dd/yyyy");
+                                    date = LocalDate.parse(dateStr, formatter);
+                                } catch (DateTimeParseException e2) {
+                                    try {
+                                        // Try dd/MM/yyyy format
+                                        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd/MM/yyyy");
+                                        date = LocalDate.parse(dateStr, formatter);
+                                    } catch (DateTimeParseException e3) {
+                                        log.warn("Could not parse date string: {}", dateStr);
+                                    }
+                                }
+                            }
+                        }
+                    } catch (Exception e) {
+                        log.warn("Error parsing date: {}", e.getMessage());
+                    }
+                }
+            }
+            
+            if (date == null) {
+                log.info("No valid date found, skipping row");
+                return null;
+            }
+            
+            // Get status
+            String status = "A"; // Default to Absent
+            if (fieldColumnMap.containsKey("status")) {
+                Cell statusCell = row.getCell(fieldColumnMap.get("status"));
+                if (statusCell != null) {
+                    status = getStringValue(statusCell);
+                    // Normalize status
+                    if (status != null) {
+                        status = status.trim().toUpperCase();
+                        // Map common status values
+                        if (status.startsWith("P")) status = "P"; // Present
+                        else if (status.startsWith("A")) status = "A"; // Absent
+                        else if (status.startsWith("L")) status = "L"; // Leave
+                        else if (status.startsWith("H")) status = "H"; // Holiday
+                        else if (status.startsWith("W")) status = "W"; // Weekend
+                        
+                        log.info("Parsed status: {}", status);
+                    }
+                }
+            }
+            
+            // Get in time
+            LocalTime inTime = null;
+            if (fieldColumnMap.containsKey("inTime")) {
+                Cell inTimeCell = row.getCell(fieldColumnMap.get("inTime"));
+                if (inTimeCell != null) {
+                    try {
+                        if (inTimeCell.getCellType() == CellType.NUMERIC) {
+                            // Time stored as a numeric value (decimal fraction of 24 hours)
+                            double timeValue = inTimeCell.getNumericCellValue();
+                            int hours = (int) timeValue;
+                            int minutes = (int) Math.round((timeValue - hours) * 60);
+                            inTime = LocalTime.of(hours, minutes);
+                            log.info("Parsed in time from numeric cell: {}", inTime);
+                        } else {
+                            // Time stored as a string
+                            String timeStr = getStringValue(inTimeCell);
+                            log.info("Raw in time string: {}", timeStr);
+                            
+                            if (timeStr != null && !timeStr.trim().isEmpty()) {
+                                try {
+                                    inTime = LocalTime.parse(timeStr, TIME_FORMATTER);
+                                } catch (DateTimeParseException e) {
+                                    log.warn("Could not parse in time string: {}", timeStr);
+                                }
+                            }
+                        }
+                    } catch (Exception e) {
+                        log.warn("Error parsing in time: {}", e.getMessage());
+                    }
+                }
+            }
+            
+            // Get out time
+            LocalTime outTime = null;
+            if (fieldColumnMap.containsKey("outTime")) {
+                Cell outTimeCell = row.getCell(fieldColumnMap.get("outTime"));
+                if (outTimeCell != null) {
+                    try {
+                        if (outTimeCell.getCellType() == CellType.NUMERIC) {
+                            // Time stored as a numeric value (decimal fraction of 24 hours)
+                            double timeValue = outTimeCell.getNumericCellValue();
+                            int hours = (int) timeValue;
+                            int minutes = (int) Math.round((timeValue - hours) * 60);
+                            outTime = LocalTime.of(hours, minutes);
+                            log.info("Parsed out time from numeric cell: {}", outTime);
+                        } else {
+                            // Time stored as a string
+                            String timeStr = getStringValue(outTimeCell);
+                            log.info("Raw out time string: {}", timeStr);
+                            
+                            if (timeStr != null && !timeStr.trim().isEmpty()) {
+                                try {
+                                    outTime = LocalTime.parse(timeStr, TIME_FORMATTER);
+                                } catch (DateTimeParseException e) {
+                                    log.warn("Could not parse out time string: {}", timeStr);
+                                }
+                            }
+                        }
+                    } catch (Exception e) {
+                        log.warn("Error parsing out time: {}", e.getMessage());
+                    }
+                }
+            }
+            
+            // Calculate hours worked
+            double hoursWorked = 0.0;
+            if (inTime != null && outTime != null) {
+                // This is a simple calculation; in a real app, you'd account for breaks, etc.
+                hoursWorked = outTime.getHour() - inTime.getHour() + 
+                        (outTime.getMinute() - inTime.getMinute()) / 60.0;
+                
+                // If hours worked is negative, it likely means work crossed midnight
+                if (hoursWorked < 0) {
+                    hoursWorked += 24;
+                }
+                log.info("Calculated hours worked from in/out times: {}", hoursWorked);
+            } else {
+                // Try to get hours worked directly from the Excel file if available
+                Cell hoursCell = null;
+                if (fieldColumnMap.containsKey("hoursWorked")) {
+                    hoursCell = row.getCell(fieldColumnMap.get("hoursWorked"));
+                }
+                if (hoursCell != null) {
+                    try {
+                        if (hoursCell.getCellType() == CellType.NUMERIC) {
+                            hoursWorked = hoursCell.getNumericCellValue();
+                            log.info("Read hours worked directly from cell: {}", hoursWorked);
+                        } else {
+                            String hoursStr = getStringValue(hoursCell);
+                            log.info("Hours cell is not numeric. Raw value: {}", hoursStr);
+                            try {
+                                hoursWorked = Double.parseDouble(hoursStr.replace(",", "."));
+                                log.info("Parsed hours from string: {}", hoursWorked);
+                            } catch (Exception ex) {
+                                log.warn("Could not parse hours worked from string: {}", hoursStr);
+                                // Default to 8 hours if present
+                                if ("P".equalsIgnoreCase(status)) {
+                                    hoursWorked = 8.0;
+                                    log.info("Defaulting to 8 hours for Present status");
+                                }
+                            }
+                        }
+                    } catch (Exception ex) {
+                        log.warn("Error reading hours worked: {}", ex.getMessage());
+                        // Default to 8 hours if present
+                        if ("P".equalsIgnoreCase(status)) {
+                            hoursWorked = 8.0;
+                            log.info("Defaulting to 8 hours for Present status due to error");
+                        }
+                    }
+                } else {
+                    // Default to 8 hours if present
+                    if ("P".equalsIgnoreCase(status)) {
+                        hoursWorked = 8.0;
+                        log.info("No hours cell found, defaulting to 8 hours for Present status");
+                    }
+                }
+            }
+            
+            boolean isLate = inTime != null && inTime.isAfter(LATE_THRESHOLD);
+            log.info("Is late: {} (in time: {}, threshold: {})", isLate, inTime, LATE_THRESHOLD);
+            
+            AttendanceRecord record = new AttendanceRecord();
+            record.setEmployeeId(employeeId);
+            record.setDate(date);
+            record.setInTime(inTime);
+            record.setOutTime(outTime);
+            record.setStatus(status);
+            record.setHoursWorked(hoursWorked);
+            record.setLate(isLate);
+            
+            log.info("Successfully created attendance record: employeeId={}, date={}, status={}, hours={}, late={}", 
+                employeeId, date, status, hoursWorked, isLate);
+            
+            return record;
+            
+        } catch (Exception e) {
+            log.error("Error parsing row: {}", e.getMessage(), e);
+            return null;
+        }
+    }
+    
+    /**
+     * Dumps the structure of an Excel sheet for debugging purposes
+     * @param sheet The sheet to dump
+     */
+    private void dumpExcelStructure(Sheet sheet) {
+        try {
+            log.info("===== EXCEL STRUCTURE DUMP =====");
+            log.info("Sheet name: {}", sheet.getSheetName());
+            log.info("Sheet has {} rows", sheet.getPhysicalNumberOfRows());
+            
+            // Sample the first few rows to understand structure
+            int sampleRows = Math.min(5, sheet.getLastRowNum());
+            log.info("Dumping first {} rows for analysis:", sampleRows);
+            
+            // Try to determine the max column count from the sample rows
+            int maxCols = 0;
+            for (int i = 0; i <= sampleRows; i++) {
+                Row row = sheet.getRow(i);
+                if (row != null) {
+                    maxCols = Math.max(maxCols, row.getLastCellNum());
+                }
+            }
+            log.info("Detected maximum of {} columns", maxCols);
+            
+            // Dump the sample rows
+            for (int i = 0; i <= sampleRows; i++) {
+                Row row = sheet.getRow(i);
+                if (row == null) {
+                    log.info("Row {} is NULL", i);
+                    continue;
+                }
+                
+                StringBuilder rowDump = new StringBuilder();
+                rowDump.append(String.format("Row %d: ", i));
+                
+                for (int j = 0; j < maxCols; j++) {
+                    Cell cell = row.getCell(j);
+                    if (cell == null) {
+                        rowDump.append("[NULL] ");
+                    } else {
+                        String cellValue = getStringValue(cell);
+                        rowDump.append(String.format("[%s] ", cellValue));
+                    }
+                }
+                
+                log.info(rowDump.toString());
+            }
+        }
+        log.info("===== END OF EXCEL STRUCTURE DUMP =====");
+    } catch (Exception e) {
+        log.warn("Error dumping Excel structure: {}", e.getMessage());
+    }
+}
+
+/**
+ * Helper method to safely get string value from a cell regardless of its type
+ * @param cell the cell to get the value from
+ * @return String representation of the cell value
+ */
+private String getStringValue(Cell cell) {
+        if (cell == null) {
+            return null;
+        }
+        
+        switch (cell.getCellType()) {
+            case STRING:
+                return cell.getStringCellValue();
+            case NUMERIC:
+                if (DateUtil.isCellDateFormatted(cell)) {
+                    // Format date as a string
+                    return cell.getLocalDateTimeCellValue().toString();
+                } else {
+                    // Convert numeric to string without decimal places if it's a whole number
+                    double value = cell.getNumericCellValue();
+                    if (value == Math.floor(value)) {
+                        return String.format("%.0f", value);
+                    } else {
+                        return String.valueOf(value);
+                    }
+                }
+            case BOOLEAN:
+                return String.valueOf(cell.getBooleanCellValue());
+            case FORMULA:
+                try {
+                    return cell.getStringCellValue();
+                } catch (Exception e) {
+                    try {
+                        return String.valueOf(cell.getNumericCellValue());
+                    } catch (Exception e2) {
+                        return "[FORMULA]";
+                    }
+                }
+            default:
+                return "";
+        }
+    }
+}
