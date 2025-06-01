@@ -58,8 +58,10 @@ public class WebSecurityConfig extends WebSecurityConfigurerAdapter {
     protected void configure(HttpSecurity httpSecurity) throws Exception {
         // We don't need CSRF for this example
         httpSecurity.cors().and().csrf().disable()
-                // Don't authenticate this particular request
-                .authorizeRequests().antMatchers("/auth/**").permitAll()
+                // Don't authenticate these particular requests
+                .authorizeRequests()
+                .antMatchers("/auth/**").permitAll()
+                .antMatchers("/webhooks/**").permitAll() // Allow webhook requests without authentication
                 // All other requests need to be authenticated
                 .anyRequest().authenticated().and()
                 // Make sure we use stateless session; session won't be used to
