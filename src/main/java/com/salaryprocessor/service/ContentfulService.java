@@ -1,14 +1,18 @@
 package com.salaryprocessor.service;
 
-import com.contentful.java.cda.CDAClient;
-import com.contentful.java.cda.CDAEntry;
-import com.contentful.java.cda.CDAArray;
-import com.contentful.java.cda.CDAResource;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.salaryprocessor.model.Employee;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestTemplate;
 
 import javax.annotation.PostConstruct;
 import java.util.ArrayList;
@@ -16,7 +20,6 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
 
 @Service
 public class ContentfulService {
@@ -24,12 +27,21 @@ public class ContentfulService {
     private static final Logger log = LoggerFactory.getLogger(ContentfulService.class);
     private static final String EMPLOYEE_CONTENT_TYPE = "employee";
     
-    private final CDAClient contentfulClient;
+    private final RestTemplate restTemplate;
+    private final String contentfulBaseUrl;
+    private final String contentfulAccessToken;
+    private final ObjectMapper objectMapper;
+    
     private List<Employee> employeeCache = new ArrayList<>();
     private Map<String, Employee> employeeMapCache = new HashMap<>();
     
-    public ContentfulService(CDAClient contentfulClient) {
-        this.contentfulClient = contentfulClient;
+    @Autowired
+    public ContentfulService(RestTemplate restTemplate, String contentfulBaseUrl, String contentfulAccessToken) {
+        this.restTemplate = restTemplate;
+        this.contentfulBaseUrl = contentfulBaseUrl;
+        this.contentfulAccessToken = contentfulAccessToken;
+        this.objectMapper = new ObjectMapper();
+        log.info("ContentfulService initialized with baseUrl: {}", contentfulBaseUrl);
     }
     
     /**
@@ -37,92 +49,31 @@ public class ContentfulService {
      */
     @PostConstruct
     public void init() {
+        log.info("Initializing ContentfulService and fetching initial employee data");
         refreshEmployeeData();
     }
 
     /**
-     * Refreshes employee data from Contentful
-     */
-    public void refreshEmployeeData() {
-        try {
-            log.info("Fetching employee data from Contentful");
-            CDAArray entries = contentfulClient.fetch(CDAEntry.class)
-                    .withContentType(EMPLOYEE_CONTENT_TYPE)
-                    .all();
-            
-            if (entries != null) {
-                List<Employee> employees = new ArrayList<>();
-                Map<String, Employee> employeeMap = new HashMap<>();
-                
-                for (CDAResource resource : entries.items()) {
-                    if (resource instanceof CDAEntry) {
-                        CDAEntry entry = (CDAEntry) resource;
-                        Employee employee = convertEntryToEmployee(entry);
-                        employees.add(employee);
-                        employeeMap.put(employee.getEmployeeId(), employee);
-                    }
-                }
-                
-                this.employeeCache = employees;
-                this.employeeMapCache = employeeMap;
-                log.info("Successfully loaded {} employees from Contentful", employees.size());
-            } else {
-                log.warn("No entries returned from Contentful");
-            }
-        } catch (Exception e) {
-            log.error("Error fetching employee data from Contentful: {}", e.getMessage(), e);
-            // If fetch fails, we'll still have the cached data (or empty lists if first time)
-        }
-    }
-    
-    /**
-     * Converts a Contentful Entry to an Employee object
-     */
-    private Employee convertEntryToEmployee(CDAEntry entry) {
-        String employeeId = entry.getField("employeeId");
-        String name = entry.getField("name");
-        Double monthlySalary = entry.getField("monthlySalary");
-        
-        log.debug("Converting Contentful entry to Employee: id={}, name={}, salary={}", 
-                employeeId, name, monthlySalary);
-        
-        Employee employee = new Employee();
-        employee.setEmployeeId(employeeId);
-        employee.setName(name);
-        employee.setMonthlySalary(monthlySalary != null ? monthlySalary : 0.0);
-        return employee;
-    }
-    
-    /**
-     * Fetch all employees from Contentful
-     * @return List of all employees
+     * Get all employees from Contentful
+     * @return List of Employee objects
      */
     public List<Employee> getAllEmployees() {
-        if (employeeCache.isEmpty()) {
-            refreshEmployeeData();
-        }
-        log.info("Returning {} employees from Contentful cache", employeeCache.size());
-        return new ArrayList<>(employeeCache);
+        log.info("Getting all employees from cache. Cache size: {}", employeeCache.size());
+        return Collections.unmodifiableList(employeeCache);
     }
-
+    
     /**
-     * Fetch an employee by ID from Contentful
-     * @param employeeId The ID of the employee to fetch
-     * @return The employee with the given ID, or a default employee if not found
+     * Get an employee by ID from the cache
+     * 
+     * @param employeeId The employee ID to lookup
+     * @return The employee with the given ID, or null if not found
      */
     public Employee getEmployeeById(String employeeId) {
-        if (employeeMapCache.isEmpty()) {
-            refreshEmployeeData();
-        }
-        
-        log.info("Fetching employee with ID: {}", employeeId);
+        log.info("Looking up employee by ID: {}", employeeId);
         Employee employee = employeeMapCache.get(employeeId);
-        
         if (employee == null) {
-            log.warn("Employee with ID {} not found in Contentful, creating default employee", employeeId);
-            employee = createDefaultEmployee(employeeId);
+            log.warn("Employee with ID {} not found in cache", employeeId);
         }
-        
         return employee;
     }
 
@@ -135,6 +86,134 @@ public class ContentfulService {
             refreshEmployeeData();
         }
         return new HashMap<>(employeeMapCache);
+    }
+    
+    /**
+     * Refresh employee data from Contentful
+     */
+    public void refreshEmployeeData() {
+        log.info("Refreshing employee data from Contentful");
+        
+        try {
+            // Set up HTTP headers with the Content Delivery API token
+            HttpHeaders headers = new HttpHeaders();
+            headers.set("Authorization", "Bearer " + contentfulAccessToken);
+            HttpEntity<String> entity = new HttpEntity<>(headers);
+            
+            // Query Contentful for employee entries
+            String url = contentfulBaseUrl + "/entries?content_type=" + EMPLOYEE_CONTENT_TYPE;
+            ResponseEntity<String> response = restTemplate.exchange(
+                    url, 
+                    HttpMethod.GET, 
+                    entity, 
+                    String.class);
+            
+            // Parse the JSON response
+            JsonNode root = objectMapper.readTree(response.getBody());
+            JsonNode items = root.path("items");
+            
+            log.info("Fetched {} entries from Contentful", items.size());
+            
+            // Convert Contentful entries to Employee objects
+            List<Employee> employees = new ArrayList<>();
+            for (JsonNode item : items) {
+                Employee employee = mapContentfulEntryToEmployee(item);
+                if (employee != null) {
+                    employees.add(employee);
+                }
+            }
+            
+            // Update cache
+            employeeCache = employees;
+            employeeMapCache = new HashMap<>();
+            for (Employee employee : employees) {
+                employeeMapCache.put(employee.getEmployeeId(), employee);
+            }
+            
+            log.info("Updated employee cache with {} employees", employees.size());
+            log.info("Employee IDs in cache: {}", employeeMapCache.keySet());
+            
+        } catch (Exception e) {
+            log.error("Error fetching employees from Contentful: {}", e.getMessage(), e);
+            // Fall back to default employee data if we can't fetch from Contentful
+            createDefaultEmployeeData();
+        }
+    }
+    
+    /**
+     * Map a Contentful entry to an Employee object
+     */
+    private Employee mapContentfulEntryToEmployee(JsonNode entry) {
+        try {
+            Employee employee = new Employee();
+            
+            // Extract fields from Contentful entry
+            JsonNode fields = entry.path("fields");
+            
+            // Employee ID is required
+            if (fields.has("employeeId")) {
+                employee.setEmployeeId(fields.path("employeeId").asText());
+            } else {
+                log.warn("Skipping employee entry without employeeId");
+                return null;
+            }
+            
+            // Name is required
+            if (fields.has("name")) {
+                employee.setName(fields.path("name").asText());
+            } else {
+                log.warn("Skipping employee entry without name");
+                return null;
+            }
+            
+            // Monthly salary
+            if (fields.has("monthlySalary")) {
+                employee.setMonthlySalary(fields.path("monthlySalary").asDouble());
+            } else {
+                // Default salary if not specified
+                employee.setMonthlySalary(50000.0);
+                log.info("Using default salary for employee {}", employee.getEmployeeId());
+            }
+            
+            log.info("Mapped Contentful entry to Employee: ID={}, Name={}, Salary={}", 
+                    employee.getEmployeeId(), employee.getName(), employee.getMonthlySalary());
+            return employee;
+            
+        } catch (Exception e) {
+            log.error("Error mapping Contentful entry to Employee: {}", e.getMessage(), e);
+            return null;
+        }
+    }
+    
+    /**
+     * Create default employee data as a fallback
+     */
+    private void createDefaultEmployeeData() {
+        log.warn("Creating default employee data as fallback");
+        
+        List<Employee> defaultEmployees = new ArrayList<>();
+        
+        // Add some default employees
+        Employee emp1 = new Employee();
+        emp1.setEmployeeId("EMP001");
+        emp1.setName("John Doe");
+        emp1.setMonthlySalary(50000.0);
+        defaultEmployees.add(emp1);
+        
+        Employee emp2 = new Employee();
+        emp2.setEmployeeId("EMP002");
+        emp2.setName("Jane Smith");
+        emp2.setMonthlySalary(60000.0);
+        defaultEmployees.add(emp2);
+        
+        // Update cache with default data
+        employeeCache = defaultEmployees;
+        employeeMapCache = new HashMap<>();
+        for (Employee employee : defaultEmployees) {
+            employeeMapCache.put(employee.getEmployeeId(), employee);
+        }
+        
+        log.info("Created default employee cache with {} employees", defaultEmployees.size());
     }
     
     /**

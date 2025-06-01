@@ -3,10 +3,9 @@ package com.salaryprocessor.config;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Bean;
+import org.springframework.web.client.RestTemplate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import com.contentful.java.cda.CDAClient;
 
 /**
  * Configuration class for Contentful integration
@@ -27,16 +26,27 @@ public class ContentfulConfig {
     private String environment;
     
     /**
-     * Create and configure Contentful CDA client
-     * @return Configured CDAClient
+     * Base URL for Contentful Content Delivery API
      */
     @Bean
-    public CDAClient contentfulClient() {
-        log.info("Initializing Contentful client for space ID: {}", spaceId);
-        return CDAClient.builder()
-                .setSpace(spaceId)
-                .setToken(accessToken)
-                .setEnvironment(environment)
-                .build();
+    public String contentfulBaseUrl() {
+        return String.format("https://cdn.contentful.com/spaces/%s/environments/%s", spaceId, environment);
+    }
+    
+    /**
+     * Access token for Contentful Content Delivery API
+     */
+    @Bean
+    public String contentfulAccessToken() {
+        return accessToken;
+    }
+    
+    /**
+     * RestTemplate for making HTTP requests to Contentful API
+     */
+    @Bean
+    public RestTemplate restTemplate() {
+        log.info("Initializing RestTemplate for Contentful API access, space ID: {}", spaceId);
+        return new RestTemplate();
     }
 }
