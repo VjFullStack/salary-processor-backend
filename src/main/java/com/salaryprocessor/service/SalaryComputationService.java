@@ -222,7 +222,7 @@ public class SalaryComputationService {
                 } else {
                     // Third late mark: half day's salary
                     // Each additional late mark after third: (half day's salary / 3)
-                    int additionalLateMarks = lateMarks - 3;
+                    long additionalLateMarks = lateMarks - 3;
                     double additionalPenalty = (halfDaySalary / 3) * additionalLateMarks;
                     lateMarkPenalty = halfDaySalary + additionalPenalty;
                 }
