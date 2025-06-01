@@ -97,7 +97,18 @@ public class JwtTokenUtil {
      * Get signing key for JWT token
      */
     private Key getSigningKey() {
-        byte[] keyBytes = secret.getBytes(StandardCharsets.UTF_8);
-        return Keys.hmacShaKeyFor(keyBytes);
+        if (secret.length() < 32) {
+            // If the secret is too short, pad it to at least 32 characters (256 bits)
+            StringBuilder paddedSecret = new StringBuilder(secret);
+            while (paddedSecret.length() < 32) {
+                paddedSecret.append(secret); // Repeat the secret to reach sufficient length
+            }
+            byte[] keyBytes = paddedSecret.toString().getBytes(StandardCharsets.UTF_8);
+            return Keys.hmacShaKeyFor(keyBytes);
+        } else {
+            // If the secret is already long enough, use it directly
+            byte[] keyBytes = secret.getBytes(StandardCharsets.UTF_8);
+            return Keys.hmacShaKeyFor(keyBytes);
+        }
     }
 }
